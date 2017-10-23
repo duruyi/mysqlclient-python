@@ -657,7 +657,7 @@ _mysql_ConnectionObject_Initialize(
 #endif
 
 
-	Py_BEGIN_ALLOW_THREADS;
+	Py_BEGIN_ALLOW_THREADS
 	if (compress != -1) {
 		mysql_options(&(self->connection), MYSQL_OPT_COMPRESS, 0);
 		client_flag |= CLIENT_COMPRESS;
