@@ -1,14 +1,17 @@
 """
+
 This module implements connections for MySQLdb. Presently there is
 only one class: Connection. Others are unlikely. However, you might
 want to make your own subclasses. In most cases, you will probably
 override Connection.default_cursor with a non-standard Cursor class.
+
 """
 import re
 import sys
 
 from MySQLdb import cursors, _mysql
 from MySQLdb.compat import unicode, PY2
+from MySQLdb.constants import ASYNC
 from MySQLdb._exceptions import (
     Warning, Error, InterfaceError, DataError,
     DatabaseError, OperationalError, IntegrityError, InternalError,
@@ -35,9 +38,11 @@ def numeric_part(s):
 
 
 class Connection(_mysql.connection):
+
     """MySQL Database Connection Object"""
 
     default_cursor = cursors.Cursor
+    _waiter = None
 
     def __init__(self, *args, **kwargs):
         """
@@ -110,6 +115,11 @@ class Connection(_mysql.connection):
             If set, the '_binary' prefix will be used for raw byte query
             arguments (e.g. Binary). This is disabled by default.
 
+        :param callable waiter
+            Callable accepts fd as an argument. It is called after sending
+            query and before reading response.
+            This is useful when using with greenlet and async io.
+
         There are a number of undocumented, non-standard methods. See the
         documentation for the MySQL C API for some hints on what they do.
         """
@@ -173,6 +183,37 @@ class Connection(_mysql.connection):
         # See PyMySQL/mysqlclient-python#306
         self.encoders[bytes] = bytes
 
+        # fb nonblocking post_connect_init setup.
+        # All done here to make merges easier with upstream
+        # The upstream __init__ continues in _post_connect_init()
+        self._charset = charset
+        self._use_unicode = use_unicode
+        self._autocommit = autocommit
+        self._sql_mode = sql_mode
+        self._nonblocking = kwargs2.get("nonblocking", False)
+        self._waiter = kwargs2.pop('waiter', None)
+        if not self._nonblocking:
+            self._post_connect_init()
+
+    def nonblocking_connect_run(self):
+        ret = super(Connection, self).nonblocking_connect_run()
+        if ret == ASYNC.NET_ASYNC_COMPLETE:
+            self._post_connect_init()
+        return ret
+
+    def _post_connect_init(self):
+        """Perform post-connection initialization; in non-blocking mode, some
+        settings are omitted such as sql_mode and autocommit."""
+        from MySQLdb.constants import CLIENT, FIELD_TYPE
+        from MySQLdb.converters import conversions, _bytes_or_str
+        from weakref import proxy
+        # unpacked for easy merges
+        autocommit = self._autocommit
+        charset = self._charset
+        sql_mode = self._sql_mode
+        use_unicode = self._use_unicode
+        # continuation of __init__
+
         self._server_version = tuple([ numeric_part(n) for n in self.get_server_info().split('.')[:2] ])
 
         self.encoding = 'ascii'  # overridden in set_character_set()
@@ -186,7 +227,8 @@ class Connection(_mysql.connection):
         self.set_character_set(charset)
 
         if sql_mode:
-            self.set_sql_mode(sql_mode)
+            if not self._nonblocking:
+                self.set_sql_mode(sql_mode)
 
         if use_unicode:
             for t in (FIELD_TYPE.STRING, FIELD_TYPE.VAR_STRING, FIELD_TYPE.VARCHAR, FIELD_TYPE.TINY_BLOB,
@@ -200,7 +242,8 @@ class Connection(_mysql.connection):
         self._transactional = self.server_capabilities & CLIENT.TRANSACTIONS
         if self._transactional:
             if autocommit is not None:
-                self.autocommit(autocommit)
+                if not self._nonblocking:
+                    self.autocommit(autocommit)
         self.messages = []
 
     def autocommit(self, on):
@@ -210,18 +253,25 @@ class Connection(_mysql.connection):
 
     def cursor(self, cursorclass=None):
         """
+
         Create a cursor on which queries may be performed. The
         optional cursorclass parameter is used to create the
         Cursor. By default, self.cursorclass=cursors.Cursor is
         used.
+
         """
         return (cursorclass or self.cursorclass)(self)
 
-    def query(self, query):
+    def query(self, query, query_attributes=None):
         # Since _mysql releases GIL while querying, we need immutable buffer.
         if isinstance(query, bytearray):
             query = bytes(query)
-        _mysql.connection.query(self, query)
+        if self._waiter is not None:
+            self.send_query(query)
+            self._waiter(self.fileno())
+            self.read_query_result()
+        else:
+            _mysql.connection.query(self, query, query_attributes)
 
     def _bytes_literal(self, bs):
         assert isinstance(bs, (bytes, bytearray))
@@ -237,7 +287,6 @@ class Connection(_mysql.connection):
         """If o is a single object, returns an SQL literal as a string.
         If o is a non-string sequence, the items of the sequence are
         converted and returned as a sequence.
-
         Non-standard. For internal use; do not use this in your
         applications.
         """
@@ -315,6 +364,7 @@ class Connection(_mysql.connection):
         warnings = r.fetch_row(0)
         return warnings
 
+
     Warning = Warning
     Error = Error
     InterfaceError = InterfaceError
@@ -325,5 +375,3 @@ class Connection(_mysql.connection):
     InternalError = InternalError
     ProgrammingError = ProgrammingError
     NotSupportedError = NotSupportedError
-
-# vim: colorcolumn=100

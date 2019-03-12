@@ -26,6 +26,10 @@ OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 */
 
+#include "mysql_version.h"
+#if MYSQL_VERSION_ID < 80004
+#include "my_config.h"
+#endif
 #include "mysql.h"
 #include "mysqld_error.h"
 
@@ -69,7 +73,14 @@ typedef struct {
     MYSQL connection;
     int open;
     PyObject *converter;
+    /* nonblocking requires the query body stay in memory during execution */
+    PyObject *current_nonblocking_query;
+    PyObject *current_nonblocking_host;
+    PyObject *current_nonblocking_username;
+    PyObject *current_nonblocking_password;
+    PyObject *current_nonblocking_dbname;
 } _mysql_ConnectionObject;
+
 
 #define check_connection(c) \
     if (!(c->open)) { \
@@ -93,7 +104,6 @@ typedef struct {
 } _mysql_ResultObject;
 
 extern PyTypeObject _mysql_ResultObject_Type;
-
 
 PyObject *
 _mysql_Exception(_mysql_ConnectionObject *c)
@@ -372,6 +382,16 @@ static int _mysql_ResultObject_clear(_mysql_ResultObject *self)
     return 0;
 }
 
+bool make_member_copy(char** ptr, PyObject **member_copy) {
+    if(*ptr) {
+        *member_copy = PyBytes_FromString(*ptr);
+        if (*member_copy == NULL)
+            return 0;
+        *ptr = PyBytes_AS_STRING(*member_copy);
+    }
+    return 1;
+}
+
 static int
 _mysql_ConnectionObject_Initialize(
     _mysql_ConnectionObject *self,
@@ -380,6 +400,7 @@ _mysql_ConnectionObject_Initialize(
 {
     MYSQL *conn = NULL;
     PyObject *conv = NULL;
+    PyObject *connection_attributes = NULL;
     PyObject *ssl = NULL;
     const char *key = NULL, *cert = NULL, *ca = NULL,
          *capath = NULL, *cipher = NULL;
@@ -397,20 +418,27 @@ _mysql_ConnectionObject_Initialize(
                   "client_flag", "ssl",
                   "local_infile",
                   "read_timeout", "write_timeout",
+                  "nonblocking",
+                  "connection_attributes",
                   NULL } ;
     int connect_timeout = 0;
     int read_timeout = 0;
     int write_timeout = 0;
     int compress = -1, named_pipe = -1, local_infile = -1;
+    int nonblocking = 0;
     char *init_command=NULL,
          *read_default_file=NULL,
          *read_default_group=NULL;
 
     self->converter = NULL;
     self->open = 0;
+    self->current_nonblocking_username = NULL;
+    self->current_nonblocking_password = NULL;
+    self->current_nonblocking_host = NULL;
+    self->current_nonblocking_dbname = NULL;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs,
-                "|ssssisOiiisssiOiii:connect",
+                "|ssssisOiiisssiOiiiiO:connect",
                 kwlist,
                 &host, &user, &passwd, &db,
                 &port, &unix_socket, &conv,
@@ -421,9 +449,23 @@ _mysql_ConnectionObject_Initialize(
                 &client_flag, &ssl,
                 &local_infile,
                 &read_timeout,
-                &write_timeout
+                &write_timeout,
+                &nonblocking,
+                &connection_attributes
     ))
         return -1;
+
+    if (nonblocking) {
+      /* We need our string parameters to be valid throughout the
+         nonblocking connect, like the query, so we create objects
+         to hold the reference. It would be cleaner to just keep
+         the objects passed in from the function but that would
+         make the diff less localized. */
+        if (!make_member_copy(&user, &self->current_nonblocking_username) ||
+            !make_member_copy(&host, &self->current_nonblocking_host) ||
+            !make_member_copy(&passwd, &self->current_nonblocking_password) ||
+            !make_member_copy(&db, &self->current_nonblocking_dbname)) return -1;
+    }
 
 #ifdef IS_PY3K
 #define _stringsuck(d,t,s) {t=PyMapping_GetItemString(s,#d);\
@@ -443,8 +485,7 @@ _mysql_ConnectionObject_Initialize(
         _stringsuck(key, value, ssl);
         _stringsuck(cipher, value, ssl);
     }
-
-    Py_BEGIN_ALLOW_THREADS ;
+    // FB: We don't do ALLOW_THREADS here, because mysql docs say mysql_init is not threadsafe
     conn = mysql_init(&(self->connection));
     self->open = 1;
     if (connect_timeout) {
@@ -462,6 +503,43 @@ _mysql_ConnectionObject_Initialize(
         mysql_options(&(self->connection), MYSQL_OPT_WRITE_TIMEOUT,
                 (char *)&timeout);
     }
+    // Iterating the Dict here is also why we don't release the GIL above
+    if (connection_attributes && PyDict_Check(connection_attributes)) {
+        mysql_options(&(self->connection), MYSQL_OPT_CONNECT_ATTR_RESET, 0);
+        PyObject *key, *value;
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(connection_attributes, &pos, &key, &value)) {
+            if (PyUnicode_Check(key)) {
+                key = PyUnicode_AsUTF8String(key);
+                if (key == NULL) {
+                    self->open = 0;
+                    return -1;
+                }
+            } else {
+                Py_INCREF(key);
+            }
+
+            if (PyUnicode_Check(value)) {
+                value = PyUnicode_AsUTF8String(value);
+                if (value == NULL) {
+                    self->open = 0;
+                    Py_DECREF(key);
+                    return -1;
+                }
+            } else {
+                Py_INCREF(value);
+            }
+            if (PyBytes_Check(key) && PyBytes_Check(value)) {
+                mysql_options4((&self->connection),
+                           MYSQL_OPT_CONNECT_ATTR_ADD,
+                           PyBytes_AsString(key),
+                           PyBytes_AsString(value));
+            }
+            Py_DECREF(key);
+            Py_DECREF(value);
+        }
+    }
+    Py_BEGIN_ALLOW_THREADS ;
     if (compress != -1) {
         mysql_options(&(self->connection), MYSQL_OPT_COMPRESS, 0);
         client_flag |= CLIENT_COMPRESS;
@@ -482,8 +560,16 @@ _mysql_ConnectionObject_Initialize(
         mysql_ssl_set(&(self->connection), key, cert, ca, capath, cipher);
     }
 
-    conn = mysql_real_connect(&(self->connection), host, user, passwd, db,
-                  port, unix_socket, client_flag);
+    if (!nonblocking) {
+      conn = mysql_real_connect(&(self->connection), host, user, passwd, db,
+                    port, unix_socket, client_flag);
+    } else {
+      int res = mysql_real_connect_nonblocking_init(&(self->connection), host, user, passwd, db,
+                       port, unix_socket, client_flag);
+      if (!res) {
+        conn = NULL;
+      }
+    }
 
     Py_END_ALLOW_THREADS ;
 
@@ -900,6 +986,57 @@ _mysql_escape_string(
     return (str);
 }
 
+static char _mysql_nonblocking_connect_run__doc__[] =
+  "Call repeatedly to continue on the nonblocking connect.  Returns a\n"
+  "net_async_status of either NET_ASYNC_COMPLETE or NET_ASYNC_NOT_READY.\n";
+
+static PyObject *
+_mysql_nonblocking_connect_run(
+    _mysql_ConnectionObject *self,
+    PyObject *noargs)
+{
+#if MYSQL_VERSION_ID >= 80004
+    enum net_async_status status;
+#else
+    net_async_status status;
+#endif
+    int error;
+
+    status = mysql_real_connect_nonblocking_run(&(self->connection), &error);
+
+    if (status == NET_ASYNC_COMPLETE) {
+      if (error) {
+        return _mysql_Exception(self);
+      }
+    }
+
+    return PyInt_FromLong(status);
+}
+
+static char _mysql_get_file_descriptor__doc__[] =
+  "Return the file descriptor of the connection for use with nonblocking socket\n"
+  "operations.";
+
+static PyObject *
+_mysql_get_file_descriptor(
+    _mysql_ConnectionObject *self,
+    PyObject *noargs)
+{
+    return PyInt_FromLong(mysql_get_file_descriptor(&(self->connection)));
+}
+
+static char _mysql_get_blocking_operation__doc__[] =
+  "Returns NET_ASYNC_OP_READING or NET_ASYNC_OP_WRITING depending on if the\n"
+  "connection is waiting for data to be read or written.";
+
+static PyObject *
+_mysql_get_blocking_operation(
+    _mysql_ConnectionObject *self,
+    PyObject *noargs)
+{
+    return PyInt_FromLong(self->connection.net.async_blocking_state);
+}
+
 static char _mysql_string_literal__doc__[] =
 "string_literal(obj) -- converts object obj into a SQL string literal.\n\
 This means, any special SQL characters are escaped, and it is enclosed\n\
@@ -1304,6 +1441,49 @@ _mysql__fetch_row(
     return -1;
 }
 
+/* Helper function for fetching rows.  Stores the row in r and status
+   in status.  A return of 0 means an error has been encounteres. */
+int
+_mysql__fetch_row_nonblocking(
+    _mysql_ResultObject *self,
+    PyObject **r,
+#if MYSQL_VERSION_ID >= 80004
+    enum net_async_status *status,
+#else
+    net_async_status *status,
+#endif
+    _PYFUNC *convert_row)
+{
+    MYSQL_ROW row;
+    PyObject *v;
+
+    *r = Py_None;
+    Py_INCREF(Py_None);
+    *status = mysql_fetch_row_nonblocking(self->result, &row);
+    if (*status == NET_ASYNC_NOT_READY) {
+      return 1;
+    }
+
+    /* Got a row; return it. */
+    if (row) {
+      v = convert_row(self, row);
+      if (!v) {
+        return 0;
+      }
+      *r = v;
+      Py_DECREF(Py_None);
+      return 1;
+    }
+
+    /* No row means end of result set; either we hit an error or the last row */
+    if (mysql_errno(&(((_mysql_ConnectionObject *)(self->conn))->connection))) {
+      _mysql_Exception((_mysql_ConnectionObject *)self->conn);
+      return 0;
+    }
+
+    return 1;
+}
+
 static char _mysql_ResultObject_fetch_row__doc__[] =
 "fetch_row([maxrows, how]) -- Fetches up to maxrows as a tuple.\n\
 The rows are formatted according to how:\n\
@@ -1370,6 +1550,63 @@ _mysql_ResultObject_fetch_row(
     return r;
   error:
     Py_XDECREF(r);
+    return NULL;
+}
+
+static char _mysql_ResultObject_fetch_row_nonblocking__doc__[] =
+  "Fetch a row from the current query set in a non-blocking manner.\n"
+  "Returns a tuple of (status, row).  Keep calling this function to\n"
+  "retrieve all rows; when row is None, If status is NET_ASYNC_NOT_READY,\n"
+  "the descriptor should be waited on for more rows.  Otherwise, status\n"
+  "is NET_ASYNC_COMPLETE, and the query is complete.\n";
+
+static PyObject *
+_mysql_ResultObject_fetch_row_nonblocking(
+    _mysql_ResultObject *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    typedef PyObject *_PYFUNC(_mysql_ResultObject *, MYSQL_ROW);
+    static char *kwlist[] = { "how", NULL };
+    static _PYFUNC *row_converters[] =
+    {
+        _mysql_row_to_tuple,
+        _mysql_row_to_dict,
+        _mysql_row_to_dict_old
+    };
+    _PYFUNC *convert_row;
+    int how=0;
+    PyObject *row=NULL, *ret=NULL;
+#if MYSQL_VERSION_ID >= 80004
+    enum net_async_status status;
+#else
+    net_async_status status;
+#endif
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|i:fetch_row_nonblocking", kwlist,
+                     &how))
+        return NULL;
+    check_result_connection(self);
+    if (how < 0 || how >= sizeof(row_converters)) {
+        PyErr_SetString(PyExc_ValueError, "how out of range");
+        return NULL;
+    }
+    convert_row = row_converters[how];
+
+    if (!(ret = PyTuple_New(2))) goto error;
+
+    if (!_mysql__fetch_row_nonblocking(self, &row, &status, convert_row)) {
+        goto error;
+    }
+
+    PyObject *s = PyLong_FromLong(status);
+    if (s == NULL) goto error;
+    PyTuple_SET_ITEM(ret, 0, s);
+    PyTuple_SET_ITEM(ret, 1, row);
+    return ret;
+  error:
+    Py_XDECREF(ret);
+    Py_XDECREF(row);
     return NULL;
 }
 
@@ -1749,8 +1986,44 @@ _mysql_ConnectionObject_query(
 {
     char *query;
     int len, r;
-    if (!PyArg_ParseTuple(args, "s#:query", &query, &len)) return NULL;
+    PyObject *query_attributes;
+    if (!PyArg_ParseTuple(args, "s#O:query", &query, &len, &query_attributes)) return NULL;
     check_connection(self);
+
+    mysql_options(&(self->connection), MYSQL_OPT_QUERY_ATTR_RESET, 0);
+    if (query_attributes && PyDict_Check(query_attributes)) {
+        PyObject *key, *value;
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(query_attributes, &pos, &key, &value)) {
+            if (PyUnicode_Check(key)) {
+                key = PyUnicode_AsUTF8String(key);
+                if (key == NULL) {
+                    return NULL;
+                }
+            }
+            else {
+                Py_INCREF(key);
+            }
+            if (PyUnicode_Check(value)) {
+                value = PyUnicode_AsUTF8String(value);
+                if (value == NULL) {
+                    Py_DECREF(key);
+                    return NULL;
+                }
+            }
+            else {
+                Py_INCREF(key);
+            }
+            if (PyBytes_Check(key) && PyBytes_Check(value)) {
+                mysql_options4((&self->connection),
+                           MYSQL_OPT_QUERY_ATTR_ADD,
+                           PyBytes_AsString(key),
+                           PyBytes_AsString(value));
+            }
+            Py_DECREF(key);
+            Py_DECREF(value);
+        }
+    }
 
     Py_BEGIN_ALLOW_THREADS
     r = mysql_real_query(&(self->connection), query, len);
@@ -1800,6 +2073,55 @@ _mysql_ConnectionObject_read_query_result(
     Py_END_ALLOW_THREADS
     if (r) return _mysql_Exception(self);
     Py_RETURN_NONE;
+}
+
+static char _mysql_ConnectionObject_query_nonblocking__doc__[] = "derp";
+
+static PyObject *
+_mysql_ConnectionObject_query_nonblocking(
+    _mysql_ConnectionObject *self,
+    PyObject *args)
+{
+    int error;
+    Py_ssize_t len;
+    char *query_str;
+    PyObject *query = NULL;
+#if MYSQL_VERSION_ID >= 80004
+    enum net_async_status status;
+#else
+    net_async_status status;
+#endif
+    if (!PyArg_ParseTuple(args, "|O", &query)) return NULL;
+    if (query && (PyBytes_Check(query) || PyUnicode_Check(query))) {
+        if (self->current_nonblocking_query) {
+            Py_DECREF(self->current_nonblocking_query);
+        }
+        if (PyUnicode_Check(query)) {
+            query = PyUnicode_AsUTF8String(query);  /* New REF */
+            if (query == NULL)
+                return NULL;
+        } else {
+            Py_INCREF(query);
+        }
+        self->current_nonblocking_query = query;
+    } else {
+        PyErr_SetObject(PyExc_TypeError, query);
+        return NULL;
+    }
+
+    check_connection(self);
+    if (PyBytes_AsStringAndSize(self->current_nonblocking_query, &query_str, &len) == -1) {
+        return NULL;
+    }
+    status = mysql_real_query_nonblocking(&(self->connection), query_str, len, &error);
+
+    if (status == NET_ASYNC_COMPLETE) {
+        Py_CLEAR(self->current_nonblocking_query);
+        if (error) {
+            return _mysql_Exception(self);
+        }
+    }
+    return PyInt_FromLong((int)status);
 }
 
 static char _mysql_ConnectionObject_select_db__doc__[] =
@@ -1978,6 +2300,10 @@ _mysql_ConnectionObject_dealloc(
         self->open = 0;
     }
     Py_CLEAR(self->converter);
+    Py_CLEAR(self->current_nonblocking_username);
+    Py_CLEAR(self->current_nonblocking_password);
+    Py_CLEAR(self->current_nonblocking_host);
+    Py_CLEAR(self->current_nonblocking_dbname);
     MyFree(self);
 }
 
@@ -2223,6 +2549,30 @@ static PyMethodDef _mysql_ConnectionObject_methods[] = {
         _mysql_ConnectionObject_read_query_result__doc__,
     },
     {
+        "get_file_descriptor",
+        (PyCFunction)_mysql_get_file_descriptor,
+        METH_NOARGS,
+        _mysql_get_file_descriptor__doc__
+    },
+    {
+        "get_blocking_operation",
+        (PyCFunction)_mysql_get_blocking_operation,
+        METH_NOARGS,
+        _mysql_get_blocking_operation__doc__
+    },
+    {
+        "query_nonblocking",
+        (PyCFunction)_mysql_ConnectionObject_query_nonblocking,
+        METH_VARARGS,
+        _mysql_ConnectionObject_query_nonblocking__doc__
+    },
+    {
+        "nonblocking_connect_run",
+        (PyCFunction)_mysql_nonblocking_connect_run,
+        METH_NOARGS,
+        _mysql_nonblocking_connect_run__doc__
+    },
+    {
         "select_db",
         (PyCFunction)_mysql_ConnectionObject_select_db,
         METH_VARARGS,
@@ -2323,6 +2673,12 @@ static PyMethodDef _mysql_ResultObject_methods[] = {
         (PyCFunction)_mysql_ResultObject_fetch_row,
         METH_VARARGS | METH_KEYWORDS,
         _mysql_ResultObject_fetch_row__doc__
+    },
+    {
+        "fetch_row_nonblocking",
+        (PyCFunction)_mysql_ResultObject_fetch_row_nonblocking,
+        METH_VARARGS | METH_KEYWORDS,
+        _mysql_ResultObject_fetch_row_nonblocking__doc__
     },
     {
         "field_flags",
@@ -2719,3 +3075,4 @@ init_mysql(void)
 }
 
 /* vim: set ts=4 sts=4 sw=4 expandtab : */
+
