@@ -6,6 +6,7 @@ from configdb import connection_kwargs
 import warnings
 warnings.simplefilter("ignore")
 
+
 class test_MySQLdb(dbapi20.DatabaseAPI20Test):
     driver = MySQLdb
     connect_args = ()
@@ -19,7 +20,7 @@ class test_MySQLdb(dbapi20.DatabaseAPI20Test):
     test for an exception if the statement cannot return a
     result set. MySQL always returns a result set; it's just that
     some things return empty result sets."""
-    
+
     def test_fetchall(self):
         con = self._connect()
         try:
@@ -34,8 +35,8 @@ class test_MySQLdb(dbapi20.DatabaseAPI20Test):
                 cur.execute(sql)
 
             # cursor.fetchall should raise an Error if called
-            # after executing a a statement that cannot return rows
-##             self.assertRaises(self.driver.Error,cur.fetchall)
+            # after executing a statement that cannot return rows
+            #self.assertRaises(self.driver.Error,cur.fetchall)
 
             cur.execute('select name from %sbooze' % self.table_prefix)
             rows = cur.fetchall()
@@ -65,10 +66,10 @@ class test_MySQLdb(dbapi20.DatabaseAPI20Test):
                 'cursor.fetchall should return an empty list if '
                 'a select query returns no rows'
                 )
-            
+
         finally:
             con.close()
-                
+
     def test_fetchone(self):
         con = self._connect()
         try:
@@ -79,7 +80,7 @@ class test_MySQLdb(dbapi20.DatabaseAPI20Test):
             self.assertRaises(self.driver.Error,cur.fetchone)
 
             # cursor.fetchone should raise an Error if called after
-            # executing a query that cannnot return rows
+            # executing a query that cannot return rows
             self.executeDDL1(cur)
 ##             self.assertRaises(self.driver.Error,cur.fetchone)
 
@@ -91,7 +92,7 @@ class test_MySQLdb(dbapi20.DatabaseAPI20Test):
             self.assertTrue(cur.rowcount in (-1,0))
 
             # cursor.fetchone should raise an Error if called after
-            # executing a query that cannnot return rows
+            # executing a query that cannot return rows
             cur.execute("insert into %sbooze values ('Victoria Bitter')" % (
                 self.table_prefix
                 ))
@@ -147,8 +148,8 @@ class test_MySQLdb(dbapi20.DatabaseAPI20Test):
 
     def help_nextset_setUp(self,cur):
         ''' Should create a procedure called deleteme
-            that returns two result sets, first the 
-	    number of rows in booze then "name from booze"
+            that returns two result sets, first the
+            number of rows in booze then "name from booze"
         '''
         sql="""
            create procedure deleteme()
@@ -164,11 +165,11 @@ class test_MySQLdb(dbapi20.DatabaseAPI20Test):
         cur.execute("drop procedure deleteme")
 
     def test_nextset(self):
-        from warnings import warn
+        #from warnings import warn
         con = self._connect()
         try:
             cur = con.cursor()
-            if not hasattr(cur,'nextset'):
+            if not hasattr(cur, 'nextset'):
                 return
 
             try:
@@ -188,8 +189,8 @@ class test_MySQLdb(dbapi20.DatabaseAPI20Test):
                 s=cur.nextset()
                 if s:
                     empty = cur.fetchall()
-                    self.assertEquals(len(empty), 0,
-                                      "non-empty result set after other result sets")
+                    self.assertEqual(len(empty), 0,
+                                     "non-empty result set after other result sets")
                     #warn("Incompatibility: MySQL returns an empty result set for the CALL itself",
                     #     Warning)
                 #assert s == None,'No more return sets, should return None'
@@ -199,6 +200,6 @@ class test_MySQLdb(dbapi20.DatabaseAPI20Test):
         finally:
             con.close()
 
-    
+
 if __name__ == '__main__':
     unittest.main()

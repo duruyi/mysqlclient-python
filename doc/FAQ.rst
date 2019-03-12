@@ -9,18 +9,11 @@
 Build Errors
 ------------
 
-  ld: fatal: library -lmysqlclient_r: not found
-
-mysqlclient_r is the thread-safe library. It's not available on
-all platforms, or all installations, apparently. You'll need to
-reconfigure site.cfg (in MySQLdb-1.2.1 and newer) to have
-threadsafe = False.
-
   mysql.h: No such file or directory
 
 This almost always mean you don't have development packages
 installed. On some systems, C headers for various things (like MySQL)
-are distributed as a seperate package. You'll need to figure out
+are distributed as a separate package. You'll need to figure out
 what that is and install it, but often the name ends with -devel.
 
 Another possibility: Some older versions of mysql_config behave oddly
@@ -33,7 +26,7 @@ probably the issue, but it shouldn't happen any more.
 ImportError
 -----------
 
-  ImportError: No module named _mysql 
+  ImportError: No module named _mysql
 
 If you see this, it's likely you did some wrong when installing
 MySQLdb; re-read (or read) README. _mysql is the low-level C module
@@ -49,7 +42,7 @@ still have to edit a configuration file so that the setup knows where
 to find MySQL and what libraries to include.
 
 
-  ImportError: libmysqlclient_r.so.14: cannot open shared object file: No such file or directory 
+  ImportError: libmysqlclient_r.so.14: cannot open shared object file: No such file or directory
 
 The number after .so may vary, but this means you have a version of
 MySQLdb compiled against one version of MySQL, and are now trying to
@@ -71,10 +64,10 @@ Solutions:
 * reconfigure your system so that the MySQL libraries are on the
   default loader path. In Linux, you edit /etc/ld.so.conf and run
   ldconfig. For Solaris, see `Linker and Libraries Guide
-  <http://docs.sun.com/app/docs/doc/817-3677/6mj8mbtbe?a=view>`_.
+  <http://docs.oracle.com/cd/E19253-01/817-1984/chapter6-63352/>`_.
 
 
-  ImportError: ld.so.1: python: fatal: libmtmalloc.so.1: DF_1_NOOPEN tagged object may not be dlopen()'ed 
+  ImportError: ld.so.1: python: fatal: libmtmalloc.so.1: DF_1_NOOPEN tagged object may not be dlopen()'ed
 
 This is a weird one from Solaris. What does it mean? I have no idea.
 However, things like this can happen if there is some sort of a compiler
@@ -86,9 +79,9 @@ different vendors.
 
 Solution: Rebuild Python or MySQL (or maybe both) from source.
 
-  ImportError: dlopen(./_mysql.so, 2): Symbol not found: _sprintf$LDBLStub 
-  Referenced from: ./_mysql.so 
-  Expected in: dynamic lookup 
+  ImportError: dlopen(./_mysql.so, 2): Symbol not found: _sprintf$LDBLStub
+  Referenced from: ./_mysql.so
+  Expected in: dynamic lookup
 
 This is one from Mac OS X. It seems to have been a compiler mismatch,
 but this time between two different versions of GCC. It seems nearly
@@ -117,7 +110,7 @@ rolled back, and they cause pending transactions to commit.
 Other Errors
 ------------
 
-  OperationalError: (1251, 'Client does not support authentication protocol requested by server; consider upgrading MySQL client')  
+  OperationalError: (1251, 'Client does not support authentication protocol requested by server; consider upgrading MySQL client')
 
 This means your server and client libraries are not the same version.
 More specifically, it probably means you have a 4.1 or newer server
@@ -139,5 +132,5 @@ Other Resources
 
 * Read `PEP-249`_
 
-.. _`PEP-249`: http://www.python.org/peps/pep-0249.html
+.. _`PEP-249`: https://www.python.org/dev/peps/pep-0249/
 

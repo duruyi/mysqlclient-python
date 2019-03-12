@@ -3,7 +3,7 @@
     for functionality and memory leaks.
 
     Adapted from a script by M-A Lemburg.
-    
+
 """
 from time import time
 import array
@@ -21,7 +21,7 @@ class DatabaseTest(unittest.TestCase):
     create_table_extra = ''
     rows = 10
     debug = False
-    
+
     def setUp(self):
         import gc
         db = connection_factory(**self.connect_kwargs)
@@ -31,18 +31,18 @@ class DatabaseTest(unittest.TestCase):
         self.BLOBBinary = self.db_module.Binary((u''.join([unichr(i) for i in range(256)] * 16)).encode('latin1'))
 
     leak_test = True
-    
+
     def tearDown(self):
         if self.leak_test:
             import gc
             del self.cursor
             orphans = gc.collect()
             self.failIf(orphans, "%d orphaned objects found after deleting cursor" % orphans)
-            
+
             del self.connection
             orphans = gc.collect()
             self.failIf(orphans, "%d orphaned objects found after deleting connection" % orphans)
-            
+
     def table_exists(self, name):
         try:
             self.cursor.execute('select * from %s where 1=0' % name)
@@ -53,7 +53,7 @@ class DatabaseTest(unittest.TestCase):
 
     def quote_identifier(self, ident):
         return '"%s"' % ident
-    
+
     def new_table_name(self):
         i = id(self.cursor)
         while True:
@@ -66,14 +66,14 @@ class DatabaseTest(unittest.TestCase):
 
         """ Create a table using a list of column definitions given in
             columndefs.
-        
+
             generator must be a function taking arguments (row_number,
             col_number) returning a suitable data object for insertion
             into the table.
 
         """
         self.table = self.new_table_name()
-        self.cursor.execute('CREATE TABLE %s (%s) %s' % 
+        self.cursor.execute('CREATE TABLE %s (%s) %s' %
                             (self.table,
                              ',\n'.join(columndefs),
                              self.create_table_extra))
@@ -81,7 +81,7 @@ class DatabaseTest(unittest.TestCase):
     def check_data_integrity(self, columndefs, generator):
         # insert
         self.create_table(columndefs)
-        insert_statement = ('INSERT INTO %s VALUES (%s)' % 
+        insert_statement = ('INSERT INTO %s VALUES (%s)' %
                             (self.table,
                              ','.join(['%s'] * len(columndefs))))
         data = [ [ generator(i,j) for j in range(len(columndefs)) ]
@@ -91,11 +91,11 @@ class DatabaseTest(unittest.TestCase):
         # verify
         self.cursor.execute('select * from %s' % self.table)
         l = self.cursor.fetchall()
-        self.assertEquals(len(l), self.rows)
+        self.assertEqual(len(l), self.rows)
         try:
             for i in range(self.rows):
                 for j in range(len(columndefs)):
-                    self.assertEquals(l[i][j], generator(i,j))
+                    self.assertEqual(l[i][j], generator(i,j))
         finally:
             if not self.debug:
                 self.cursor.execute('drop table %s' % (self.table))
@@ -106,7 +106,7 @@ class DatabaseTest(unittest.TestCase):
             if col == 0: return row
             else: return ('%i' % (row%10))*255
         self.create_table(columndefs)
-        insert_statement = ('INSERT INTO %s VALUES (%s)' % 
+        insert_statement = ('INSERT INTO %s VALUES (%s)' %
                             (self.table,
                              ','.join(['%s'] * len(columndefs))))
         data = [ [ generator(i,j) for j in range(len(columndefs)) ]
@@ -116,10 +116,10 @@ class DatabaseTest(unittest.TestCase):
         self.connection.commit()
         self.cursor.execute('select * from %s' % self.table)
         l = self.cursor.fetchall()
-        self.assertEquals(len(l), self.rows)
+        self.assertEqual(len(l), self.rows)
         for i in range(self.rows):
             for j in range(len(columndefs)):
-                self.assertEquals(l[i][j], generator(i,j))
+                self.assertEqual(l[i][j], generator(i,j))
         delete_statement = 'delete from %s where col1=%%s' % self.table
         self.cursor.execute(delete_statement, (0,))
         self.cursor.execute('select col1 from %s where col1=%s' % \
@@ -139,7 +139,7 @@ class DatabaseTest(unittest.TestCase):
             if col == 0: return row
             else: return ('%i' % (row%10))*((255-self.rows//2)+row)
         self.create_table(columndefs)
-        insert_statement = ('INSERT INTO %s VALUES (%s)' % 
+        insert_statement = ('INSERT INTO %s VALUES (%s)' %
                             (self.table,
                              ','.join(['%s'] * len(columndefs))))
 
@@ -151,7 +151,7 @@ class DatabaseTest(unittest.TestCase):
             self.fail("Over-long column did not generate warnings/exception with single insert")
 
         self.connection.rollback()
-        
+
         try:
             for i in range(self.rows):
                 data = []
@@ -164,7 +164,7 @@ class DatabaseTest(unittest.TestCase):
             self.fail("Over-long columns did not generate warnings/exception with execute()")
 
         self.connection.rollback()
-        
+
         try:
             data = [ [ generator(i,j) for j in range(len(columndefs)) ]
                      for i in range(self.rows) ]
@@ -195,12 +195,23 @@ class DatabaseTest(unittest.TestCase):
 
     def test_DECIMAL(self):
         # DECIMAL
+        from decimal import Decimal
         def generator(row,col):
-            from decimal import Decimal
             return Decimal("%d.%02d" % (row, col))
         self.check_data_integrity(
             ('col1 DECIMAL(5,2)',),
             generator)
+
+        val = Decimal('1.11111111111111119E-7')
+        self.cursor.execute('SELECT %s', (val,))
+        result = self.cursor.fetchone()[0]
+        self.assertEqual(result, val)
+        self.assertIsInstance(result, Decimal)
+
+        self.cursor.execute('SELECT %s + %s', (Decimal('0.1'), Decimal('0.2')))
+        result = self.cursor.fetchone()[0]
+        self.assertEqual(result, Decimal('0.3'))
+        self.assertIsInstance(result, Decimal)
 
     def test_DATE(self):
         ticks = time()
@@ -279,3 +290,9 @@ class DatabaseTest(unittest.TestCase):
                  ('col1 INT','col2 BLOB'),
                  generator)
 
+    def test_DOUBLE(self):
+        for val in (18014398509481982.0, 0.1):
+            self.cursor.execute('SELECT %s', (val,));
+            result = self.cursor.fetchone()[0]
+            self.assertEqual(result, val)
+            self.assertIsInstance(result, float)

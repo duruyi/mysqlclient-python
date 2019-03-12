@@ -2,12 +2,11 @@
 
 This module provides some Date and Time classes for dealing with MySQL data.
 
-Use Python datetime module to handle date and time columns."""
-
-import math
+Use Python datetime module to handle date and time columns.
+"""
 from time import localtime
 from datetime import date, datetime, time, timedelta
-from _mysql import string_literal
+from MySQLdb._mysql import string_literal
 
 Date = date
 Time = time
@@ -33,34 +32,48 @@ format_TIME = format_DATE = str
 
 def format_TIMEDELTA(v):
     seconds = int(v.seconds) % 60
-    minutes = int(v.seconds / 60) % 60
-    hours = int(v.seconds / 3600) % 24
+    minutes = int(v.seconds // 60) % 60
+    hours = int(v.seconds // 3600) % 24
     return '%d %d:%d:%d' % (v.days, hours, minutes, seconds)
 
 def format_TIMESTAMP(d):
-    return d.isoformat(" ")
+    """
+    :type d: datetime.datetime
+    """
+    if d.microsecond:
+        fmt = "{0.year:04}-{0.month:02}-{0.day:02} {0.hour:02}:{0.minute:02}:{0.second:02}.{0.microsecond:06}"
+    else:
+        fmt = "{0.year:04}-{0.month:02}-{0.day:02} {0.hour:02}:{0.minute:02}:{0.second:02}"
+    return fmt.format(d)
 
 
 def DateTime_or_None(s):
-    if ' ' in s:
-        sep = ' '
-    elif 'T' in s:
-        sep = 'T'
-    else:
-        return Date_or_None(s)
-
     try:
-        d, t = s.split(sep, 1)
-        if '.' in t:
-            t, ms = t.split('.',1)
-            ms = ms.ljust(6, '0')
+        if len(s) < 11:
+            return Date_or_None(s)
+
+        micros = s[20:]
+
+        if len(micros) == 0:
+            # 12:00:00
+            micros = 0
+        elif len(micros) < 7:
+            # 12:00:00.123456
+            micros = int(micros) * 10 ** (6 - len(micros))
         else:
-            ms = 0
-        return datetime(*[ int(x) for x in d.split('-')+t.split(':')+[ms] ])
-    except (SystemExit, KeyboardInterrupt):
-        raise
-    except:
-        return Date_or_None(s)
+            return None
+
+        return datetime(
+            int(s[:4]),          # year
+            int(s[5:7]),         # month
+            int(s[8:10]),        # day
+            int(s[11:13] or 0),  # hour
+            int(s[14:16] or 0),  # minute
+            int(s[17:19] or 0),  # second
+            micros,              # microsecond
+        )
+    except ValueError:
+        return None
 
 def TimeDelta_or_None(s):
     try:
@@ -101,30 +114,18 @@ def Time_or_None(s):
 
 def Date_or_None(s):
     try:
-        return date(*[ int(x) for x in s.split('-',2)])
-    except (SystemExit, KeyboardInterrupt):
-        raise
-    except:
+        return date(
+            int(s[:4]),    # year
+            int(s[5:7]),   # month
+            int(s[8:10]),  # day
+        )
+    except ValueError:
         return None
 
 def DateTime2literal(d, c):
     """Format a DateTime object as an ISO timestamp."""
-    return string_literal(format_TIMESTAMP(d),c)
-    
+    return string_literal(format_TIMESTAMP(d))
+
 def DateTimeDelta2literal(d, c):
     """Format a DateTimeDelta object as a time."""
-    return string_literal(format_TIMEDELTA(d),c)
-
-def mysql_timestamp_converter(s):
-    """Convert a MySQL TIMESTAMP to a Timestamp object."""
-    # MySQL>4.1 returns TIMESTAMP in the same format as DATETIME
-    if s[4] == '-': return DateTime_or_None(s)
-    s = s + "0"*(14-len(s)) # padding
-    parts = map(int, filter(None, (s[:4],s[4:6],s[6:8],
-                                   s[8:10],s[10:12],s[12:14])))
-    try:
-        return Timestamp(*parts)
-    except (SystemExit, KeyboardInterrupt):
-        raise
-    except:
-        return None
+    return string_literal(format_TIMEDELTA(d))

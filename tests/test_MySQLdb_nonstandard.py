@@ -1,11 +1,12 @@
 import unittest
 
-import _mysql
+from MySQLdb import _mysql
 import MySQLdb
 from MySQLdb.constants import FIELD_TYPE
 from configdb import connection_factory
 import warnings
 warnings.simplefilter("ignore")
+
 
 class TestDBAPISet(unittest.TestCase):
     def test_set_equality(self):
@@ -21,12 +22,8 @@ class TestDBAPISet(unittest.TestCase):
         self.assertTrue(FIELD_TYPE.DATE != MySQLdb.STRING)
 
 
-class CoreModule(unittest.TestCase):
+class TestCoreModule(unittest.TestCase):
     """Core _mysql module features."""
-
-    def test_NULL(self):
-        """Should have a NULL constant."""
-        self.assertEqual(_mysql.NULL, 'NULL')
 
     def test_version(self):
         """Version information sanity."""
@@ -38,8 +35,11 @@ class CoreModule(unittest.TestCase):
     def test_client_info(self):
         self.assertTrue(isinstance(_mysql.get_client_info(), str))
 
-    def test_thread_safe(self):
-        self.assertTrue(isinstance(_mysql.thread_safe(), int))
+    def test_escape_string(self):
+        self.assertEqual(_mysql.escape_string(b'foo"bar'),
+                         b'foo\\"bar', "escape byte string")
+        self.assertEqual(_mysql.escape_string(u'foo"bar'),
+                         b'foo\\"bar', "escape unicode string")
 
 
 class CoreAPI(unittest.TestCase):
@@ -60,8 +60,8 @@ class CoreAPI(unittest.TestCase):
                           "thread_id shouldn't accept arguments.")
 
     def test_affected_rows(self):
-        self.assertEquals(self.conn.affected_rows(), 0,
-                          "Should return 0 before we do anything.")
+        self.assertEqual(self.conn.affected_rows(), 0,
+                         "Should return 0 before we do anything.")
 
 
     #def test_debug(self):
@@ -83,5 +83,19 @@ class CoreAPI(unittest.TestCase):
 
     def test_server_info(self):
         self.assertTrue(isinstance(self.conn.get_server_info(), str),
-                        "Should return an str.")
+                        "Should return a string.")
 
+    def test_client_flag(self):
+        conn = connection_factory(
+            use_unicode=True,
+            client_flag=MySQLdb.constants.CLIENT.FOUND_ROWS)
+
+        self.assertIsInstance(conn.client_flag, (int, MySQLdb.compat.long))
+        self.assertTrue(conn.client_flag & MySQLdb.constants.CLIENT.FOUND_ROWS)
+        with self.assertRaises(TypeError if MySQLdb.compat.PY2 else AttributeError):
+            conn.client_flag = 0
+
+        conn.close()
+
+    def test_fileno(self):
+        self.assertGreaterEqual(self.conn.fileno(), 0)
